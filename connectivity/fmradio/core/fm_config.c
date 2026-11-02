@@ -548,6 +548,8 @@ static void fm_cust_cfg_retry_fn(struct work_struct *work)
 		fm_cust_config_print(&fm_config);
 		pr_info("fmradio: %s loaded on retry #%d\n",
 			FM_CUST_CFG_PATH, fm_cust_cfg_retry_cnt);
+		/* rodin 6.18（2026-11-03）：成功复位重试计数 */
+		fm_cust_cfg_retry_cnt = 0;
 		return;
 	}
 	if (++fm_cust_cfg_retry_cnt <= FM_CUST_CFG_RETRY_MAX) {

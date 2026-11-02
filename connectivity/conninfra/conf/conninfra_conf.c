@@ -518,7 +518,14 @@ static int conf_parse(const char *pInBuf, unsigned int size)
 	return 0;
 }
 
-static int platform_request_firmware(char *patch_name, osal_firmware **ppPatch)
+/*
+ * rodin 6.18（2026-11-03）：@no_uevent 为真
+ * 的重试轮次走 request_firmware_direct()（FW_OPT_NOFALLBACK_SYSFS），不再每败
+ * 向用户态发一次 firmware uevent；boot 首轮仍用 request_firmware() 保留原厂
+ * uevent 兜底语义。
+ */
+static int platform_request_firmware(char *patch_name, osal_firmware **ppPatch,
+				     bool no_uevent)
 {
 	int ret;
 	osal_firmware *fw = NULL;
@@ -530,7 +537,12 @@ static int platform_request_firmware(char *patch_name, osal_firmware **ppPatch)
 
 	*ppPatch = NULL;
 	do {
-		ret = request_firmware((const struct firmware **)&fw,
+		if (no_uevent)
+			ret = request_firmware_direct(
+					(const struct firmware **)&fw,
+					patch_name, NULL);
+		else
+			ret = request_firmware((const struct firmware **)&fw,
 							patch_name, NULL);
 		if (ret == -EAGAIN) {
 			pr_err("failed to open or read!(%s), retry again!\n",
@@ -576,6 +588,8 @@ static void conninfra_conf_retry_fn(struct work_struct *work)
 	if (conninfra_conf_init_internal(true) == 0) {
 		pr_info("conninfra.cfg loaded on retry #%d\n",
 			conninfra_conf_retry_cnt);
+		/* rodin 6.18（2026-11-03）：成功复位，后续重载仍用满预算 */
+		conninfra_conf_retry_cnt = 0;
 		return;
 	}
 	if (++conninfra_conf_retry_cnt <= CONFINFRA_CONF_RETRY_MAX) {
@@ -617,7 +631,8 @@ static int conninfra_conf_init_internal(bool wait_for_fw)
 
 	if (0 ==
 	    platform_request_firmware(&g_conninfra_conf.conf_name[0],
-					(osal_firmware **) &conf_inst)) {
+					(osal_firmware **) &conf_inst,
+					wait_for_fw)) {
 		/*get full name patch success */
 		pr_debug("get full file name(%s) buf(0x%p) size(%zu)\n",
 			      &g_conninfra_conf.conf_name[0], conf_inst->data,
