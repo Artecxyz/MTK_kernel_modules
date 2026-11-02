@@ -124,13 +124,15 @@ static bool align_and_check(unsigned long *gap_end, unsigned long gap_start,
  * ensured that the gap does not end on a 4GB boundary, and for the case when
  * memory needs to be confined within a 4GB chunk.
  *
- * On kernels >= 6.1 the rb-tree helpers are gone; the identical
- * hole-by-hole top-down scan is replayed with a vma_iterator
- * (descending from TASK_SIZE via vma_prev()), one align_and_check()
- * probe per hole. This replaces the previous mas_empty_area_rev()
- * retry loop, whose re-entrant rewind gave no termination guarantee
- * once align_and_check() permanently rejected the highest empty
- * area.
+ * On kernels >= 6.1 the rb-tree helpers are gone; the same top-down
+ * hole probe is instead driven by the maple tree's reverse gap query
+ * (mas_empty_area_rev(), which is the body of the internal
+ * vma_iter_area_highest()), so a probe costs O(log n) instead of a
+ * walk over every VMA. If align_and_check() permanently rejects the
+ * highest gap, the search ceiling is pulled below that gap and the
+ * query is retried; the ceiling strictly decreases every round, so
+ * termination does not depend on the maple iterator's rewind
+ * behaviour.
  *
  * Return: address of the found gap end (high limit) if area is found;
  *         -ENOMEM if search is unsuccessful
@@ -229,7 +231,7 @@ check_current:
 		}
 	}
 #else
-	unsigned long length, low_limit, high_limit, gap_start, gap_end;
+	unsigned long length, high_limit, gap_start, gap_end, hole_start;
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	struct vma_iterator vmi;
@@ -239,65 +241,65 @@ check_current:
 	if (length < info->length)
 		return -ENOMEM;
 
-	/*
-	 * Adjust search limits by the desired length.
-	 * See implementation comment at top of unmapped_area().
-	 */
-	gap_end = info->high_limit;
-	if (gap_end < length)
+	/* 窗口为空直接失败；同时挡住 high_limit 为 0 时
+	 * "high_limit - 1" 的回绕（否则窗口变成全地址空间）。 */
+	if (info->high_limit <= info->low_limit)
 		return -ENOMEM;
-	high_limit = gap_end - length;
 
-	if (info->low_limit > high_limit)
-		return -ENOMEM;
-	low_limit = info->low_limit + length;
+	high_limit = info->high_limit;
 
 	/*
-	 * Replay the rb-tree algorithm below for kernels < 6.1 on the maple
-	 * tree: walk the VMAs in descending address order and probe the hole
-	 * above each one, from the top down, one align_and_check() per hole.
+	 * rodin 6.18（2026-11-03，GPU 空洞搜索改 maple gap 查询）：
+	 * 逐 VMA 反向下扫是 O(VMA 数)，且全程持 mm->mmap_lock 写锁，
+	 * VMA 多的进程（渲染/相册类）mmap 持锁时间随 VMA 数线性增长。
+	 * 改为 maple tree 反向 gap 查询，窗口与内核
+	 * unmapped_area_topdown() 一致：[info->low_limit, high_limit)，
+	 * 一次 O(log n) 定位最高空洞。vma_iter_area_highest() 是
+	 * mm/vma.h 的内部静态内联（本文件编译时 srctree 根不在 include
+	 * 路径上，无法引用），此处直接调用它的全部实现
+	 * mas_empty_area_rev()。
 	 *
-	 * Start from TASK_SIZE, not info->high_limit: vma_prev() returns the
-	 * VMA ending at or before the iterator position, so a VMA straddling
-	 * the search ceiling would be skipped from a info->high_limit start
-	 * and its mapped body would be wrongly counted as hole space.
+	 * 对齐/4GB 约束永久拒绝最高空洞时，把本地搜索上限压到该空洞下沿
+	 * 之下重试（恢复 ba901c7 的收缩语义）：每轮窗口严格缩小至少
+	 * length，终止性由收缩保证，不再依赖 mas rewind 的行为。
+	 * 只改本地 high_limit，不回写调用方复用的 info 字段。
 	 */
-	vma_iter_init(&vmi, mm, TASK_SIZE);
-
-	for (vma = vma_prev(&vmi); vma; vma = vma_prev(&vmi)) {
-		gap_start = vma->vm_end;
-
-		/* Clip the hole top with the original high_limit. */
-		if (gap_end > info->high_limit)
-			gap_end = info->high_limit;
-
-		if (gap_start <= high_limit && gap_end - gap_start >= length) {
-			if (align_and_check(&gap_end, gap_start, info, is_shader_code,
-					    is_same_4gb_page))
-				return gap_end;
-		}
-
-		/* The next hole's top is this VMA's start; once the hole tops
-		 * drop below the adjusted low limit, every remaining hole is
-		 * lower still.
+	for (;;) {
+		/*
+		 * 每轮从干净状态发起查询：mas_empty_area_rev() 在旧 mas
+		 * 状态下可能走 rewind 分支并返回 -EBUSY，vma_iter_init()
+		 * 让它从树根重新开始。
 		 */
-		gap_end = vma->vm_start;
-		if (gap_end < low_limit)
+		vma_iter_init(&vmi, mm, 0);
+		/* vma_iter_area_highest() 的内联体：max 为闭区间上界。 */
+		if (mas_empty_area_rev(&vmi.mas, info->low_limit, high_limit - 1, length))
 			return -ENOMEM;
-	}
 
-	/*
-	 * The hole below the lowest VMA (the whole range when no VMA was
-	 * visited): its floor is 0, align_and_check() enforces
-	 * info->low_limit.
-	 */
-	gap_start = 0;
-	if (gap_end > info->high_limit)
-		gap_end = info->high_limit;
-	if (gap_end - gap_start >= length) {
-		if (align_and_check(&gap_end, gap_start, info, is_shader_code,
+		gap_start = vmi.mas.index;
+		gap_end = vmi.mas.last + 1;
+
+		/*
+		 * align_and_check() 的 4GB 回退会把起点压到候选切片下沿
+		 * 之下（仍可落在空洞内），所以第二个参数必须给空洞真实
+		 * 下沿，与 pre-6.1 的 rb-tree 分支同义：gap 之下的相邻
+		 * VMA 末尾即空洞下沿（无则 0）。
+		 */
+		vma_iter_init(&vmi, mm, gap_start);
+		vma = vma_prev(&vmi);
+		hole_start = vma ? vma->vm_end : 0;
+
+		if (align_and_check(&gap_end, hole_start, info, is_shader_code,
 				    is_same_4gb_page))
 			return gap_end;
+
+		/*
+		 * 该空洞被对齐/4GB 约束永久拒绝：可用地址只可能在其下沿
+		 * 之下，压上限重试；gap_start <= info->low_limit 说明窗口
+		 * 已无处可压，按搜索耗尽返回。
+		 */
+		if (gap_start <= info->low_limit)
+			return -ENOMEM;
+		high_limit = gap_start;
 	}
 #endif
 	return -ENOMEM;
