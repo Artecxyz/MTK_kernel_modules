@@ -13,6 +13,7 @@
 #include <linux/rpmsg/mtk_ccd_rpmsg.h>
 #include <uapi/linux/mtk_ccd_controls.h>
 #include <linux/version.h>
+#include <linux/rodin_vendor_fw.h>
 
 #include "remoteproc_internal.h"
 #include "iommu_debug.h"
@@ -20,9 +21,8 @@
 #define CCD_DEV_NAME	"mtk_ccd"
 #define MAX_CODE_SIZE 0x500000
 
-#define CCD_BOOT_FIRST_DELAY_MS	3000
 #define CCD_BOOT_RETRY_MS	1000
-#define CCD_BOOT_MAX_ATTEMPTS	30
+#define CCD_BOOT_MAX_ATTEMPTS	3
 
 char ccd_firmware[100] = {0};
 
@@ -376,15 +376,19 @@ static void ccd_unregcdev(struct mtk_ccd *ccd)
 }
 
 /*
- * rodin: probe 在 vseq initcall 期运行，早于 /vendor 挂载；remoteproc
- * 核心的 auto_boot 只请求一次固件（request_firmware_nowait），失败无重试。
- * 关 auto_boot，改为轮询 rproc_boot：固件随 /vendor 挂载可得后即成功。
+ * rodin 6.18（2026-11-03，mtk_ccd 固件门闩）：probe 在 vseq initcall 期
+ * 运行，早于 /vendor 挂载；remoteproc 核心 auto_boot 只发一次必败请求，原实现
+ * 固定晚 3s 再 30×1s 重试，每次 rproc_boot 都重做 request_firmware/carveout。
+ * 改为先阻塞等共享 fw 门（门开=目录可达；GAVE_UP 也仅做有界小重试），再单次
+ * rproc_boot，仅失败时按 1s×3 兜底。
  */
 static void ccd_boot_work(struct work_struct *work)
 {
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct mtk_ccd *ccd = container_of(dwork, struct mtk_ccd, boot_work);
 	int ret;
+
+	rodin_vendor_fw_wait();
 
 	ret = rproc_boot(ccd->rproc);
 	if (!ret) {
@@ -499,8 +503,8 @@ static int ccd_probe(struct platform_device *pdev)
 	mtk_create_client_msgdevice(ccd->rpmsg_subdev);
 
 	INIT_DELAYED_WORK(&ccd->boot_work, ccd_boot_work);
-	schedule_delayed_work(&ccd->boot_work,
-			      msecs_to_jiffies(CCD_BOOT_FIRST_DELAY_MS));
+	/* 门闩工作会自行等待 /vendor/firmware，无需固定 3s 前摇 */
+	schedule_delayed_work(&ccd->boot_work, 0);
 
 	return 0;
 
