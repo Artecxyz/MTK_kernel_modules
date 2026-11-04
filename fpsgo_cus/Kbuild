@@ -47,7 +47,7 @@ obj-m += fpsgo.o
 fpsgo-y += src/fpsgo_main.o
 
 ifeq (m,$(CONFIG_MTK_FPSGO_V3))
-  ifeq (y,$(CONFIG_CFI_CLANG))
+  ifeq (y,$(CONFIG_CFI))
     ifeq (y,$(CONFIG_SHADOW_CALL_STACK))
       fpsgo-y += src/xgf_v3_ko_quark.o
       always-y += src/.xgf_v3_ko_quark.o.cmd
@@ -78,7 +78,7 @@ endif
 obj-m += game.o
 game-y += src/game_main.o
 
-ifeq (y,$(CONFIG_CFI_CLANG))
+ifeq (y,$(CONFIG_CFI))
   ifeq (y,$(CONFIG_SHADOW_CALL_STACK))
     game-y += src/game_private_quark.o
     always-y += src/.game_private_quark.o.cmd

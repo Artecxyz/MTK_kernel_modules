@@ -49,7 +49,7 @@ subdir-ccflags-y += -I$(DEVICE_MODULES_PATH)/drivers/misc/mediatek/sched/
 obj-m += cpuqos_ext.o
 cpuqos_ext-y += src/cpuqos_ext_main.o
 
-ifeq (y,$(CONFIG_CFI_CLANG))
+ifeq (y,$(CONFIG_CFI))
     cpuqos_ext-$(CONFIG_MTK_CPUQOS_EXT) += src/cpuqos_build_utility.o
     always-y += src/.cpuqos_build_utility.o.cmd
 else
@@ -59,7 +59,7 @@ endif
 
 obj-m += eas_ext.o
 eas_ext-y += src/eas_ext_main.o
-ifeq (y,$(CONFIG_CFI_CLANG))
+ifeq (y,$(CONFIG_CFI))
 	eas_ext-$(CONFIG_MTK_SCHED_GROUP_AWARE) += src/eas_ext_grp.o
 	always-y += src/.eas_ext_grp.o.cmd
 else
@@ -70,7 +70,7 @@ endif
 obj-m += mtk_em.o
 ifeq (y,$(CONFIG_ARM64))
 mtk_em-y += src/mtk_em/mtk_em_main.o
-ifeq (y,$(CONFIG_CFI_CLANG))
+ifeq (y,$(CONFIG_CFI))
 	mtk_em-y += src/mtk_em/mtk_em_hook.o
 	always-y += src/mtk_em/.mtk_em_hook.o.cmd
 	mtk_em-y += src/mtk_em/v3/em_int.o

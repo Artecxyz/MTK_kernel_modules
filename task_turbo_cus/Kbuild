@@ -50,7 +50,7 @@ ccflags-y += -I$(CUR_DIR)/
 obj-m += task_turbo_v.o
 ifeq (y,$(CONFIG_ARM64))
 	task_turbo_v-y += src/task_turbo_main.o
-	ifeq (y,$(CONFIG_CFI_CLANG))
+	ifeq (y,$(CONFIG_CFI))
 		task_turbo_v-y += src/task_turbo_hook.o
 		always-y += src/.task_turbo_hook.o.cmd
 		task_turbo_v-y += src/task_turbo_api.o
